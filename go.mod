@@ -5,7 +5,7 @@ go 1.22.2
 require (
 	github.com/dgraph-io/badger/v4 v4.2.0
 	github.com/gocql/gocql v1.6.0
-	github.com/stretchr/testify v1.8.0
+	github.com/stretchr/testify v1.9.0
 	golang.org/x/sync v0.7.0
 )
 
