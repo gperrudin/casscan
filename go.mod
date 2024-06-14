@@ -1,4 +1,4 @@
-module casscan
+module github.com/gperrudin/casscan
 
 go 1.22.2
 
