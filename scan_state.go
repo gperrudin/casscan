@@ -7,7 +7,7 @@ import (
 )
 
 type scanState struct {
-	Token         int64
+	Token         *int64
 	ScanRowsCount int64
 	Finished      bool
 }

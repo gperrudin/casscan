@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/gocql/gocql"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -29,21 +30,11 @@ func NewScanner(stateStore Store, session *gocql.Session) *Scanner {
 
 // Iter creates a new iterator for the given scanId and query. The query should be a SELECT statement.
 func (s *Scanner) Iter(ctx context.Context, scanId string, stmt string, values ...interface{}) (*Iter, error) {
-	state, err := s.stateStore.load(ctx, scanId)
-	if err != nil {
-		return nil, err
-	}
-
-	var lastTokenPtr *int64
-	if state != nil {
-		lastTokenPtr = &state.Token
-	}
-
 	q := query{
 		stmt:   stmt,
 		values: values,
 		rng: tokenRange{
-			from: lastTokenPtr,
+			from: nil,
 			to:   nil,
 		},
 	}
@@ -73,7 +64,17 @@ func (s *Scanner) SplitIter(ctx context.Context, scanId string, splits int, stmt
 }
 
 func (s *Scanner) buildIter(ctx context.Context, scanId string, q query) (*Iter, error) {
-	gocqlQuery, err := s.buildQuery(ctx, q)
+	state, err := s.stateStore.load(ctx, scanId)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastToken *int64
+	if state != nil && state.Token != nil {
+		lastToken = state.Token
+	}
+
+	gocqlQuery, err := s.buildQuery(ctx, q, lastToken)
 	if err != nil {
 		return nil, fmt.Errorf("could not build query: %w", err)
 	}
@@ -87,10 +88,14 @@ func (s *Scanner) buildIter(ctx context.Context, scanId string, q query) (*Iter,
 		iter:   gocqlQuery.Iter(),
 	}
 
+	if state != nil {
+		it.state = *state
+	}
+
 	return &it, nil
 }
 
-func (s *Scanner) buildQuery(ctx context.Context, q query) (*gocql.Query, error) {
+func (s *Scanner) buildQuery(ctx context.Context, q query, lastToken *int64) (*gocql.Query, error) {
 	parsed, err := parceCQLQuery(q.stmt)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse query: %w", err)
@@ -110,6 +115,11 @@ func (s *Scanner) buildQuery(ctx context.Context, q query) (*gocql.Query, error)
 			toTokenClause := fmt.Sprintf("token(%s) < %d", strings.Join(pkColumns, ", "), *q.rng.to)
 			parsed.addWhere(toTokenClause)
 		}
+	}
+
+	if lastToken != nil {
+		lastTokenClause := fmt.Sprintf("token(%s) >= %d", strings.Join(pkColumns, ", "), *lastToken)
+		parsed.addWhere(lastTokenClause)
 	}
 
 	parsed.columnsPart += fmt.Sprintf(", token(%s)", strings.Join(pkColumns, ", "))
@@ -209,9 +219,12 @@ func (it *Iter) Progress() float64 {
 	if it.ReadCount() == 0 {
 		return 0
 	}
+	if it.state.Token == nil {
+		return 0
+	}
 
 	rng := tokenRange{
-		from: it.query.rng.to,
+		from: it.query.rng.from,
 		to:   it.query.rng.to,
 	}
 	if rng.from == nil {
@@ -223,14 +236,24 @@ func (it *Iter) Progress() float64 {
 		rng.to = &max
 	}
 
-	if it.state.Token < *rng.from {
+	if *it.state.Token < *rng.from {
 		return 0
 	}
-	if it.state.Token >= *rng.to {
+	if *it.state.Token >= *rng.to {
 		return 1
 	}
 
-	return float64(it.state.Token-*rng.from) / float64(*rng.to-*rng.from)
+	// progress = (state.Token - rng.from) / (rng.to - rng.from)
+	// we need to use big int/floats to avoid overflow
+
+	rngSize := big.NewInt(*rng.to)
+	rngSize = rngSize.Sub(rngSize, big.NewInt(*rng.from))
+
+	doneSize := big.NewInt(*it.state.Token)
+	doneSize.Sub(doneSize, big.NewInt(*rng.from))
+
+	progress, _ := new(big.Float).Quo(new(big.Float).SetInt(doneSize), new(big.Float).SetInt(rngSize)).Float64()
+	return progress
 }
 
 // EstimatedCount returns the estimated number of rows that the iterator will read.
