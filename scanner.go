@@ -69,12 +69,7 @@ func (s *Scanner) buildIter(ctx context.Context, scanId string, q query) (*Iter,
 		return nil, err
 	}
 
-	var lastToken *int64
-	if state != nil && state.Token != nil {
-		lastToken = state.Token
-	}
-
-	gocqlQuery, err := s.buildQuery(ctx, q, lastToken)
+	gocqlQuery, err := s.buildQuery(ctx, q, state)
 	if err != nil {
 		return nil, fmt.Errorf("could not build query: %w", err)
 	}
@@ -95,13 +90,13 @@ func (s *Scanner) buildIter(ctx context.Context, scanId string, q query) (*Iter,
 	return &it, nil
 }
 
-func (s *Scanner) buildQuery(ctx context.Context, q query, lastToken *int64) (*gocql.Query, error) {
+func (s *Scanner) buildQuery(ctx context.Context, q query, state *scanState) (*gocql.Query, error) {
 	parsed, err := parceCQLQuery(q.stmt)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse query: %w", err)
 	}
 
-	pkColumns, err := getPrimaryKeyColumns(s.session, parsed.keyspace, parsed.table)
+	pkColumns, ckColumns, err := getColumns(s.session, parsed.keyspace, parsed.table)
 	if err != nil {
 		return nil, fmt.Errorf("could not get primary key columns: %w", err)
 	}
@@ -117,8 +112,15 @@ func (s *Scanner) buildQuery(ctx context.Context, q query, lastToken *int64) (*g
 		}
 	}
 
-	if lastToken != nil {
-		lastTokenClause := fmt.Sprintf("token(%s) >= %d", strings.Join(pkColumns, ", "), *lastToken)
+	if state != nil && state.Token != nil {
+		var lastTokenClause string
+		if len(ckColumns) > 0 {
+			// if there is a clustering key, we need to start from the last token because we don't know if there are more rows within this partition
+			lastTokenClause = fmt.Sprintf("token(%s) >= %d", strings.Join(pkColumns, ", "), *state.Token)
+		} else {
+			lastTokenClause = fmt.Sprintf("token(%s) > %d", strings.Join(pkColumns, ", "), *state.Token)
+		}
+
 		parsed.addWhere(lastTokenClause)
 	}
 
@@ -127,15 +129,15 @@ func (s *Scanner) buildQuery(ctx context.Context, q query, lastToken *int64) (*g
 	return s.session.Query(parsed.String(), q.values...).WithContext(ctx), nil
 }
 
-// getPrimaryKeyColumns returns the primary key columns for the given table.
-func getPrimaryKeyColumns(s *gocql.Session, keyspace, table string) ([]string, error) {
+// getPrimaryKeyColumns returns the pk and ck columns for the given keyspace and table.
+func getColumns(s *gocql.Session, keyspace, table string) ([]string, []string, error) {
 	keyspaceMetadata, err := s.KeyspaceMetadata(keyspace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tableMetadata := keyspaceMetadata.Tables[table]
 	if tableMetadata == nil {
-		return nil, fmt.Errorf("could not find metadata for table: %s.%s", keyspace, table)
+		return nil, nil, fmt.Errorf("could not find metadata for table: %s.%s", keyspace, table)
 	}
 
 	pkColumns := make([]string, 0)
@@ -143,7 +145,12 @@ func getPrimaryKeyColumns(s *gocql.Session, keyspace, table string) ([]string, e
 		pkColumns = append(pkColumns, pkColumn.Name)
 	}
 
-	return pkColumns, nil
+	ckColumns := make([]string, 0)
+	for _, ckColumn := range tableMetadata.ClusteringColumns {
+		ckColumns = append(ckColumns, ckColumn.Name)
+	}
+
+	return pkColumns, ckColumns, nil
 }
 
 func (s *Scanner) store(ctx context.Context, id string, state *scanState) error {
