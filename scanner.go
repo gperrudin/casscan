@@ -11,6 +11,7 @@ import (
 )
 
 type Scanner struct {
+	config     Config
 	stateStore scanStateStore
 	session    *gocql.Session
 }
@@ -21,11 +22,17 @@ type query struct {
 	rng    tokenRange
 }
 
-func NewScanner(stateStore Store, session *gocql.Session) *Scanner {
-	return &Scanner{
+func NewScanner(stateStore Store, session *gocql.Session, options ...Option) *Scanner {
+	s := &Scanner{
 		stateStore: newScanStateStore(stateStore),
 		session:    session,
 	}
+
+	for _, opt := range options {
+		opt(&s.config)
+	}
+
+	return s
 }
 
 // Iter creates a new iterator for the given scanId and query. The query should be a SELECT statement.
@@ -166,10 +173,14 @@ type Iter struct {
 	iter   *gocql.Iter
 
 	state scanState
+
+	lastSavedCount int64
 }
 
 // Scan is a wrapper around gocql.Iter.Scan
 func (it *Iter) Scan(dest ...interface{}) bool {
+	defer it.autoSave()
+
 	if it.state.Finished {
 		return false
 	}
@@ -178,6 +189,8 @@ func (it *Iter) Scan(dest ...interface{}) bool {
 	if it.iter.Scan(values...) {
 		it.state.ScanRowsCount++
 		return true
+	} else if err := it.iter.Close(); err != nil {
+		return false
 	} else {
 		it.state.Finished = true
 		return false
@@ -186,7 +199,7 @@ func (it *Iter) Scan(dest ...interface{}) bool {
 
 // Save stores the current state of the iterator.
 func (it *Iter) Save() error {
-	return it.scanner.store(it.ctx, it.scanId, &it.state)
+	return it.doSave()
 }
 
 // Reset resets the iterator to the initial state.
@@ -266,6 +279,24 @@ func (it *Iter) Progress() float64 {
 // EstimatedCount returns the estimated number of rows that the iterator will read.
 func (it *Iter) EstimatedCount() int64 {
 	return int64(float64(it.ReadCount()) / it.Progress())
+}
+
+func (it *Iter) autoSave() error {
+	if it.scanner.config.AutoSaveInterval <= 0 {
+		return nil
+	}
+
+	if it.Finished() && (it.state.ScanRowsCount-it.lastSavedCount >= it.scanner.config.AutoSaveInterval) {
+		if err := it.doSave(); err != nil {
+			return nil
+		}
+		it.lastSavedCount = it.state.ScanRowsCount
+	}
+	return nil
+}
+
+func (it *Iter) doSave() error {
+	return it.scanner.store(it.ctx, it.scanId, &it.state)
 }
 
 type Iters []*Iter
