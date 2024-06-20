@@ -8,7 +8,7 @@ import (
 // SQLStore is a Store implementation backed by a SQL store (table should be created beforehand)
 // It uses the provided sql.DB as the database connection
 // The table should have the following schema:
-// CREATE TABLE scan_state (
+// CREATE TABLE casscan_state (
 //
 //	id VARCHAR(255) PRIMARY KEY,
 //	state BLOB
@@ -26,7 +26,7 @@ func NewSQLStore(db *sql.DB) *SQLStore {
 
 func (s *SQLStore) Load(ctx context.Context, id string) ([]byte, error) {
 	var data []byte
-	err := s.db.QueryRowContext(ctx, "SELECT state FROM scan_state WHERE id = ?", id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, "SELECT state FROM casscan_state WHERE id = ?", id).Scan(&data)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func (s *SQLStore) Load(ctx context.Context, id string) ([]byte, error) {
 }
 
 func (s *SQLStore) LoadPrefix(ctx context.Context, prefix string) (map[string][]byte, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, state FROM scan_state WHERE id LIKE ?", prefix+"%")
+	rows, err := s.db.QueryContext(ctx, "SELECT id, state FROM casscan_state WHERE id LIKE ?", prefix+"%")
 	if err != nil {
 		return nil, err
 	}
